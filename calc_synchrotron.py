@@ -93,7 +93,7 @@ def process():
     compute_spectrum(x, outputName)
 
     plotName = '%s/sync.png' % plotDir
-    plot(outputName, plotName)
+#    plot(outputName, plotName)
     
 # ----------------------------------------------------------------
 # main

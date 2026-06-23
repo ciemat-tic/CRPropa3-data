@@ -4,9 +4,76 @@ import interactionRate
 import os
 import gitHelp as gh
 from calc_all import fields_cmbebl, fields_urb
-from units import eV, mass_electron, c_light, sigma_thomson, alpha_finestructure
+from units import eV, mass_electron, c_light, sigma_thomson, alpha_finestructure, Mpc
+from scipy import integrate
 
 me2 = (mass_electron*c_light**2.) ** 2  # squared electron mass [J^2/c^4]
+ICS_RATE_S_KIN_MIN = 1e4 * eV**2
+ICS_DEFAULT_THOMSON_TRANSITION = 1e8 * eV
+
+def photon_number_density(field):
+    """
+    Total photon number density of the background field [1/m^3].
+    field.getDensity(eps) returns dn/deps [1/m^3/J].
+    """
+
+    eps = np.logspace(
+        np.log10(field.getEmin()),
+        np.log10(field.getEmax()),
+        10000
+    )
+
+    # Try vectorized evaluation first
+    try:
+        n_eps = field.getDensity(eps)
+    except Exception:
+        n_eps = np.array([field.getDensity(e) for e in eps])
+
+    n_eps = np.asarray(n_eps, dtype=float)
+
+    # Ensure 1D shape
+    n_eps = np.squeeze(n_eps)
+
+    # If something strange happens, fall back to scalar evaluation
+    if n_eps.shape != eps.shape:
+        n_eps = np.array([float(field.getDensity(float(e))) for e in eps])
+
+    # Remove possible nan/inf values
+    mask = np.isfinite(eps) & np.isfinite(n_eps)
+
+    eps = eps[mask]
+    n_eps = n_eps[mask]
+
+    return integrate.simpson(n_eps, x=eps)
+
+def thomson_rate(field):
+    """
+    Low-energy ICS inverse mean free path [1/Mpc].
+    """
+    n = photon_number_density(field)      # [1/m^3]
+    rate_m = n * sigma_thomson           # [1/m]
+    return rate_m * Mpc                  # [1/Mpc]
+
+def ics_thomson_transition(field):
+    """
+    Energy below which the ICS rate is replaced by the Thomson limit.
+    """
+    transition = ICS_DEFAULT_THOMSON_TRANSITION
+
+    if field.name.startswith("URB"):
+        # URB photons reach much lower energies than CMB/IRB photons. The
+        # fixed s_kin grid can then miss most of the target photons at low
+        # electron energies, while the interaction is still in the Thomson
+        # regime. Extend the correction until the grid reaches the low-energy
+        # edge of the field, capped by the Klein-Nishina turnover at Emax.
+        grid_limited_transition = ICS_RATE_S_KIN_MIN / (4 * field.getEmin())
+        kn_limited_transition = me2 / (4 * field.getEmax())
+        transition = max(
+            transition,
+            min(grid_limited_transition, kn_limited_transition)
+        )
+
+    return transition
 
 def sigmaPP(s):
     """ Pair production cross section (Breit-Wheeler), see Lee 1996 """
@@ -28,17 +95,26 @@ def sigmaDPP(s):
 
 
 def sigmaICS(s):
-    """ Inverse Compton scattering cross sections, see Lee 1996 """
-    smin = me2
-    if (s < smin):  # numerically unstable close to smin
-        return 0
+    """Inverse Compton scattering cross section.
 
-    # note: formula unstable for (s - smin) / smin < 1E-5
+    At low energy, use the Thomson limit.
+    """
+    smin = me2
+
+    if s <= smin:
+        return sigma_thomson
+
+    x = (s - smin) / smin
+
+    # Avoid numerical instability very close to threshold.
+    if x < 1e-5:
+        return sigma_thomson
+
     b = (s - smin) / (s + smin)
     A = 2 / b / (1 + b) * (2 + 2 * b - b**2 - 2 * b**3)
     B = (2 - 3 * b**2 - b**3) / b**2 * (np.log1p(b) - np.log1p(-b))
-    return sigma_thomson * 3 / 8 * smin / s / b * (A - B)
 
+    return sigma_thomson * 3 / 8 * smin / s / b * (A - B)
 
 def sigmaTPP(s):
     """ Triplet-pair production cross section, see Lee 1996 """
@@ -88,7 +164,7 @@ def process(sigma, field, name):
 
     # tabulated energies, limit to energies where the interaction is possible
     Emin = getEmin(sigma, field)
-    E = np.logspace(9, 23, 281) * eV
+    E = np.logspace(6, 23, 341) * eV
     E = E[E > Emin]
     
     # -------------------------------------------
@@ -100,6 +176,14 @@ def process(sigma, field, name):
     xs = getTabulatedXS(sigma, s_kin)
     rate = interactionRate.calc_rate_s(s_kin, xs, E, field)
 
+    # Low-energy correction for inverse Compton scattering.
+    # The Klein-Nishina expression becomes numerically unstable close to threshold,
+    # but physically sigma_ICS -> sigma_Thomson.
+    if sigma is sigmaICS:
+        low_energy_rate = thomson_rate(field)
+        E_transition = ics_thomson_transition(field)
+        mask = E <= E_transition
+        rate[mask] = low_energy_rate
     # save
     fname = folder + '/rate_%s.txt' % field.name
     data = np.c_[np.log10(E / eV), rate]
@@ -156,7 +240,7 @@ def process(sigma, field, name):
 
 if __name__ == "__main__":
 
-    for field in fields_cmbebl+fields_urb:
+    for field in fields_cmbebl + fields_urb:
         print(field.name)
         process(sigmaPP, field, 'EMPairProduction')
         process(sigmaDPP, field, 'EMDoublePairProduction')
