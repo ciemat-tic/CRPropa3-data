@@ -8,7 +8,18 @@ from units import eV, mass_electron, c_light, sigma_thomson, alpha_finestructure
 from scipy import integrate
 
 me2 = (mass_electron*c_light**2.) ** 2  # squared electron mass [J^2/c^4]
-ICS_RATE_S_KIN_MIN = 1e4 * eV**2
+ENERGY_LOG10_MIN = 0
+ENERGY_LOG10_MAX = 23
+ENERGY_LOG10_STEP = 0.05
+S_KIN_LOG10_MAX = 23
+S_KIN_DEFAULT_LOG10_MIN = 4
+S_KIN_ICS_LOG10_MIN = -12
+S_KIN_RATE_POINTS = 2 ** 18 + 1
+S_KIN_CDF_POINTS_PER_DECADE = 2000
+S_KIN_SAVE_LOG10_STEP = 0.1
+RATE_CHUNK_SIZE = 16
+CDF_CHUNK_SIZE = 8
+ICS_RATE_S_KIN_MIN = 10 ** S_KIN_ICS_LOG10_MIN * eV**2
 ICS_DEFAULT_THOMSON_TRANSITION = 1e8 * eV
 
 def photon_number_density(field):
@@ -148,6 +159,59 @@ def getEmin(sigma, field):
     return getSmin(sigma) / 4 / field.getEmax()
 
 
+def getPrimaryEnergyGrid():
+    """Return the tabulated primary kinetic-energy grid [J]."""
+    n = int(round((ENERGY_LOG10_MAX - ENERGY_LOG10_MIN) / ENERGY_LOG10_STEP)) + 1
+    return np.logspace(ENERGY_LOG10_MIN, ENERGY_LOG10_MAX, n) * eV
+
+
+def getSKinLog10Min(sigma):
+    """Return the lower s_kin grid edge in log10(eV^2)."""
+    if sigma is sigmaICS:
+        return S_KIN_ICS_LOG10_MIN
+    return S_KIN_DEFAULT_LOG10_MIN
+
+
+def getRateSKinGrid(sigma):
+    """Return the Romberg-compatible s_kin grid for total rates [J^2]."""
+    return np.logspace(
+        getSKinLog10Min(sigma),
+        S_KIN_LOG10_MAX,
+        S_KIN_RATE_POINTS
+    ) * eV**2
+
+
+def getCDFSKinGrid(sigma):
+    """Return the high-resolution s_kin grid for cumulative rates [J^2]."""
+    log_min = getSKinLog10Min(sigma)
+    n = int(round((S_KIN_LOG10_MAX - log_min) * S_KIN_CDF_POINTS_PER_DECADE)) + 1
+    return np.logspace(log_min, S_KIN_LOG10_MAX, n) * eV**2
+
+
+def getSavedSKinGrid(sigma):
+    """Return the saved s_kin grid. The 0.1 dex spacing matches C++ sampling."""
+    log_min = getSKinLog10Min(sigma)
+    n = int(round((S_KIN_LOG10_MAX - log_min) / S_KIN_SAVE_LOG10_STEP)) + 1
+    return np.logspace(log_min, S_KIN_LOG10_MAX, n) * eV**2
+
+
+def calcRateSChunked(s_kin, xs, E, field, cdf=False):
+    """Calculate rates in energy chunks to keep the 1 eV extension memory-safe."""
+    chunk_size = CDF_CHUNK_SIZE if cdf else RATE_CHUNK_SIZE
+    chunks = []
+    for i in range(0, len(E), chunk_size):
+        chunks.append(
+            interactionRate.calc_rate_s(
+                s_kin,
+                xs,
+                E[i:i + chunk_size],
+                field,
+                cdf=cdf
+            )
+        )
+    return np.concatenate(chunks, axis=0)
+
+
 def process(sigma, field, name):
     """ 
         calculate the interaction rates for a given process on a given photon field 
@@ -162,19 +226,18 @@ def process(sigma, field, name):
     if not os.path.exists(folder):
         os.makedirs(folder)
 
-    # tabulated energies, limit to energies where the interaction is possible
-    Emin = getEmin(sigma, field)
-    E = np.logspace(6, 23, 341) * eV
-    E = E[E > Emin]
+    # Tabulated primary kinetic energies. Keep the full grid down to 1 eV so
+    # low-energy propagation can use the same data files without extrapolation.
+    E = getPrimaryEnergyGrid()
     
     # -------------------------------------------
     # calculate interaction rates
     # -------------------------------------------
     # tabulated values of s_kin = s - mc^2
     # Note: integration method (Romberg) requires 2^n + 1 log-spaced tabulation points
-    s_kin = np.logspace(4, 23, 2 ** 18 + 1) * eV**2
+    s_kin = getRateSKinGrid(sigma)
     xs = getTabulatedXS(sigma, s_kin)
-    rate = interactionRate.calc_rate_s(s_kin, xs, E, field)
+    rate = calcRateSChunked(s_kin, xs, E, field)
 
     # Low-energy correction for inverse Compton scattering.
     # The Klein-Nishina expression becomes numerically unstable close to threshold,
@@ -208,14 +271,14 @@ def process(sigma, field, name):
 
     # tabulated values of s_kin = s - mc^2, limit to relevant range
     # Note: use higher resolution and then downsample
-    skin = np.logspace(4, 23, 380000 + 1) * eV**2
+    skin = getCDFSKinGrid(sigma)
     skin = skin[skin > skin_min]
 
     xs = getTabulatedXS(sigma, skin)
-    rate = interactionRate.calc_rate_s(skin, xs, E, field, cdf=True)
+    rate = calcRateSChunked(skin, xs, E, field, cdf=True)
 
     # downsample
-    skin_save = np.logspace(4, 23, 190 + 1) * eV**2
+    skin_save = getSavedSKinGrid(sigma)
     skin_save = skin_save[skin_save > skin_min]
     rate_save = np.array([np.interp(skin_save, skin, r) for r in rate])
 
