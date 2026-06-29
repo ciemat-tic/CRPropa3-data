@@ -113,15 +113,15 @@ def sigmaICS(s):
     smin = me2
 
     if s <= smin:
-        return sigma_thomson
+        return 0.
 
-    x = (s - smin) / smin
+    delta = s - smin
 
     # Avoid numerical instability very close to threshold.
-    if x < 1e-5:
+    if delta / smin <= 1e-5:
         return sigma_thomson
 
-    b = (s - smin) / (s + smin)
+    b = delta / (s + smin)
     A = 2 / b / (1 + b) * (2 + 2 * b - b**2 - 2 * b**3)
     B = (2 - 3 * b**2 - b**3) / b**2 * (np.log1p(b) - np.log1p(-b))
 
