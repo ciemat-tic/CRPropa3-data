@@ -4,8 +4,7 @@ import interactionRate
 import os
 import gitHelp as gh
 from calc_all import fields_cmbebl, fields_urb
-from units import eV, mass_electron, c_light, sigma_thomson, alpha_finestructure, Mpc
-from scipy import integrate
+from units import eV, mass_electron, c_light, h_planck, k_boltzmann, sigma_thomson, alpha_finestructure, Mpc
 
 me2 = (mass_electron*c_light**2.) ** 2  # squared electron mass [J^2/c^4]
 ENERGY_LOG10_MIN = 0
@@ -19,72 +18,8 @@ S_KIN_CDF_POINTS_PER_DECADE = 2000
 S_KIN_SAVE_LOG10_STEP = 0.1
 RATE_CHUNK_SIZE = 16
 CDF_CHUNK_SIZE = 8
-ICS_RATE_S_KIN_MIN = 10 ** S_KIN_ICS_LOG10_MIN * eV**2
-ICS_DEFAULT_THOMSON_TRANSITION = 1e8 * eV
-
-def photon_number_density(field):
-    """
-    Total photon number density of the background field [1/m^3].
-    field.getDensity(eps) returns dn/deps [1/m^3/J].
-    """
-
-    eps = np.logspace(
-        np.log10(field.getEmin()),
-        np.log10(field.getEmax()),
-        10000
-    )
-
-    # Try vectorized evaluation first
-    try:
-        n_eps = field.getDensity(eps)
-    except Exception:
-        n_eps = np.array([field.getDensity(e) for e in eps])
-
-    n_eps = np.asarray(n_eps, dtype=float)
-
-    # Ensure 1D shape
-    n_eps = np.squeeze(n_eps)
-
-    # If something strange happens, fall back to scalar evaluation
-    if n_eps.shape != eps.shape:
-        n_eps = np.array([float(field.getDensity(float(e))) for e in eps])
-
-    # Remove possible nan/inf values
-    mask = np.isfinite(eps) & np.isfinite(n_eps)
-
-    eps = eps[mask]
-    n_eps = n_eps[mask]
-
-    return integrate.simpson(n_eps, x=eps)
-
-def thomson_rate(field):
-    """
-    Low-energy ICS inverse mean free path [1/Mpc].
-    """
-    n = photon_number_density(field)      # [1/m^3]
-    rate_m = n * sigma_thomson           # [1/m]
-    return rate_m * Mpc                  # [1/Mpc]
-
-def ics_thomson_transition(field):
-    """
-    Energy below which the ICS rate is replaced by the Thomson limit.
-    """
-    transition = ICS_DEFAULT_THOMSON_TRANSITION
-
-    if field.name.startswith("URB"):
-        # URB photons reach much lower energies than CMB/IRB photons. The
-        # fixed s_kin grid can then miss most of the target photons at low
-        # electron energies, while the interaction is still in the Thomson
-        # regime. Extend the correction until the grid reaches the low-energy
-        # edge of the field, capped by the Klein-Nishina turnover at Emax.
-        grid_limited_transition = ICS_RATE_S_KIN_MIN / (4 * field.getEmin())
-        kn_limited_transition = me2 / (4 * field.getEmax())
-        transition = max(
-            transition,
-            min(grid_limited_transition, kn_limited_transition)
-        )
-
-    return transition
+ICS_THOMSON_TRANSITION = 1e8 * eV
+PHOTON_DENSITY_POINTS = 200000
 
 def sigmaPP(s):
     """ Pair production cross section (Breit-Wheeler), see Lee 1996 """
@@ -108,7 +43,9 @@ def sigmaDPP(s):
 def sigmaICS(s):
     """Inverse Compton scattering cross section.
 
-    At low energy, use the Thomson limit.
+    The Klein-Nishina expression is used on one continuous s-grid. Very close
+    to threshold the analytic Thomson limit avoids cancellation without
+    switching to a separate low-energy rate table.
     """
     smin = me2
 
@@ -159,6 +96,33 @@ def getEmin(sigma, field):
     return getSmin(sigma) / 4 / field.getEmax()
 
 
+def photonNumberDensity(field):
+    """Return the total photon number density of a background field [1/m^3]."""
+    if hasattr(field, "T_CMB"):
+        zeta3 = 1.202056903159594
+        return (
+            16.0
+            * np.pi
+            * zeta3
+            * (k_boltzmann * field.T_CMB) ** 3
+            / (h_planck * c_light) ** 3
+        )
+
+    eps = np.logspace(
+        np.log10(field.getEmin()),
+        np.log10(field.getEmax()),
+        PHOTON_DENSITY_POINTS
+    )
+    density = np.asarray(field.getDensity(eps), dtype=float).squeeze()
+    density = np.where(np.isfinite(density), density, 0.)
+    return np.trapz(density, eps)
+
+
+def thomsonRate(field):
+    """Return the low-energy inverse Compton rate in the Thomson limit [1/Mpc]."""
+    return photonNumberDensity(field) * sigma_thomson * Mpc
+
+
 def getPrimaryEnergyGrid():
     """Return the tabulated primary kinetic-energy grid [J]."""
     n = int(round((ENERGY_LOG10_MAX - ENERGY_LOG10_MIN) / ENERGY_LOG10_STEP)) + 1
@@ -198,6 +162,7 @@ def getSavedSKinGrid(sigma):
 def calcRateSChunked(s_kin, xs, E, field, cdf=False):
     """Calculate rates in energy chunks to keep the 1 eV extension memory-safe."""
     chunk_size = CDF_CHUNK_SIZE if cdf else RATE_CHUNK_SIZE
+    density_primary_energy_max = np.max(E)
     chunks = []
     for i in range(0, len(E), chunk_size):
         chunks.append(
@@ -206,7 +171,8 @@ def calcRateSChunked(s_kin, xs, E, field, cdf=False):
                 xs,
                 E[i:i + chunk_size],
                 field,
-                cdf=cdf
+                cdf=cdf,
+                density_primary_energy_max=density_primary_energy_max
             )
         )
     return np.concatenate(chunks, axis=0)
@@ -238,15 +204,9 @@ def process(sigma, field, name):
     s_kin = getRateSKinGrid(sigma)
     xs = getTabulatedXS(sigma, s_kin)
     rate = calcRateSChunked(s_kin, xs, E, field)
-
-    # Low-energy correction for inverse Compton scattering.
-    # The Klein-Nishina expression becomes numerically unstable close to threshold,
-    # but physically sigma_ICS -> sigma_Thomson.
     if sigma is sigmaICS:
-        low_energy_rate = thomson_rate(field)
-        E_transition = ics_thomson_transition(field)
-        mask = E <= E_transition
-        rate[mask] = low_energy_rate
+        rate[E <= ICS_THOMSON_TRANSITION] = thomsonRate(field)
+
     # save
     fname = folder + '/rate_%s.txt' % field.name
     data = np.c_[np.log10(E / eV), rate]
