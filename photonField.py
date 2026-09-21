@@ -626,6 +626,9 @@ class URB_Protheroe96(PhotonField):
 
         I[eps < self.getEmin()] = 0
         I[eps > self.getEmax()] = 0
+        # explicit handling for shape (1,) to avoid broadcasting error
+        if I.shape == (1,):
+            I = I[0]
         return I
 
     def getEmin(self, z=0):
@@ -671,6 +674,9 @@ class URB_Fixsen11(PhotonField):
         I = 8. * np.pi / c_light ** 3 / h_planck ** 3 * eps ** 2 / (np.expm1(eps / (k_boltzmann * T)))
         I[eps < self.getEmin()] = 0.
         I[eps > self.getEmax()] = 0.
+        # explicit handling for shape (1,) to avoid broadcasting error
+        if I.shape == (1,):
+            I = I[0]
         return I
 
     def getEmin(self, z = 0.):
@@ -729,6 +735,10 @@ class URB_Nitu21(PhotonField):
 
         I[eps < self.getEmin()] = 0.
         I[eps > self.getEmax()] = 0.
+        
+        # explicit handling for shape (1,) to avoid broadcasting error
+        if I.shape == (1,):
+            I = I[0]
 
         return I
 

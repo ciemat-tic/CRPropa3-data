@@ -6,9 +6,13 @@ from units import mass_electron, c_squared, c_light, h_planck, keV, amu
 
 cdir = os.path.split(__file__)[0]
 
-# Script to preprocess the nuclear decay data table from the BNL NuDat2 database
-# Decay Search: http://www.nndc.bnl.gov/nudat2/indx_sigma.jsp, output: formatted file --> decay_NuDat2.txt
-# Decay Radiation Search: gamma_NuDat2.txt: http://www.nndc.bnl.gov/nudat2/indx_dec.jsp --> gamma_NuDat2.txt
+# Script to preprocess the nuclear decay data table from the BNL NuDat3 database
+# Decay Search: https://www.nndc.bnl.gov/nudat3/indx_sigma.jsp, output: formatted file --> decay_NuDat3.txt
+# Decay Radiation Search: https://www.nndc.bnl.gov/nudat3/indx_dec.jsp --> gamma_NuDat3.txt
+# Coverage: Z = 0-82 (neutron to lead), N = 0-132
+
+ZMAX = 82   # maximum proton number (Pb)
+NMAX = 132  # maximum neutron number (Pb-214)
 
 class NuclearMassTable(object):
     """Class to provide tabulated nuclear masses
@@ -19,34 +23,34 @@ class NuclearMassTable(object):
     """
 
     def __init__(self):
+        self._table = {}
         try:
             datapath = os.path.join(cdir, 'data/nuclear_mass.txt')
-            self.massTable = np.loadtxt(datapath, usecols=(2))
+            data = np.loadtxt(datapath, usecols=(0, 1, 2))
+            if data.ndim == 1:
+                data = data.reshape(1, -1)
+            self._table = {(int(row[0]), int(row[1])): row[2] for row in data}
         except FileNotFoundError:
             print("The file 'data/nuclear_mass.txt' was not found.")
             print("Run the script calc_mass.py and try again.")
 
-    def getMass(self, id: int) -> float:
-        """Helper function to return tabulated nuclear masses
-        
-        id is not the usual CRPropa PID but id = Z * 31 + N
-        with Z the charge number and N the neutron number.
-        """
-        return self.massTable[id]
-    
-    def nuclearMass(self, A: int, Z: int) -> float: 
-        """nuclear mass for given mass (A) and charge (Z) number
-        
-        Particle masses that are not tabulated are approximated by
-        A*amu-Z*mass_electron.
-        """
+    def getMass(self, Z: int, N: int):
+        """Return tabulated nuclear mass for given Z and N, or None if not found."""
+        return self._table.get((Z, N))
 
-        if ((A < 1) or (A > 56) or (Z < 0) or (Z > 26) or (Z > A)):
-            print ("nuclearMass: nuclear mass not found in the mass table for A = {}, Z = {}. Approximated value used A * amu - Z * m_e instead.".format(A, Z))
-            return A * amu - Z * mass_electron
+    def nuclearMass(self, A: int, Z: int) -> float:
+        """Nuclear mass for given mass (A) and charge (Z) number.
+
+        Particle masses that are not tabulated are approximated by
+        A*amu - Z*mass_electron.
+        """
         N = A - Z
-        
-        return self.getMass(Z * 31 + N)
+        if (A < 1) or (Z < 0) or (Z > A) or (Z > ZMAX) or (N > NMAX):
+            return A * amu - Z * mass_electron
+        mass = self.getMass(Z, N)
+        if mass is None:
+            return A * amu - Z * mass_electron
+        return mass
 
 class Decay:
     def load(self, s):
@@ -117,23 +121,27 @@ class GammaEmission:
 print ('\nParsing gamma emission data file')
 print ('-------------------------------------')
 
-datapath = os.path.join(cdir, 'tables/gamma_NuDat2.txt')
+datapath = os.path.join(cdir, 'tables/gamma_NuDat3.txt')
 data = open(datapath)
 lines = data.readlines()[1:-3] # skip header and footer
 data.close()
 
 # create list of gamma emission entries for each isotope
-gammaTable = [[{} for n in range(31)] for z in range(27)]
+gammaTable = [[{} for n in range(NMAX + 1)] for z in range(ZMAX + 1)]
 for i, line in enumerate(lines):
     l = line.split('\t')
     Z = int(l[2])
     N = int(l[3])
     mode = l[7].strip()
-    if (Z > 26) or (N > 30):  # skip if higher than Fe-56
+    if (Z > ZMAX) or (N > NMAX):  # skip if beyond table range
         continue
     if (mode == 'IT'):  # skip isomeric transition
         continue
-    if (l[4].strip() == '0+X' or float(l[4]) > 0):  # skip if parent nuclei in excited state
+    try:
+        in_excited_state = float(l[4]) > 0
+    except ValueError:
+        in_excited_state = True  # non-numeric label means excited state
+    if in_excited_state:  # skip if parent nuclei in excited state
         continue
     if (l[11].strip() != 'G'):  # take only gamma radiation type
         continue
@@ -142,8 +150,8 @@ for i, line in enumerate(lines):
     gammaTable[Z][N].setdefault(mode, []).append(line)
 
 # for each isotope and decay mode combine all gamma entries
-for Z in range(27):
-    for N in range(31):
+for Z in range(ZMAX + 1):
+    for N in range(NMAX + 1):
         if not(gammaTable[Z][N]):  # no entry
             continue
         for mode, entries in gammaTable[Z][N].items():
@@ -177,32 +185,32 @@ g0.intensity = intensity
 g0.energy = energy
 print (g0, ' <- removed additional beta- decay with same properties\n')
 
-# for beta- and beta+ decay of V-50 emission probability of photon is 100% if decay happens
-g0 = gammaTable[23][27]['B-']
+# for EC decay of V-50 emission probability of photon is 100% if decay happens
 g1 = gammaTable[23][27]['EC']
-g0.intensity[0] = 100.
 g1.intensity[0] = 100.
-print (g0, ' <- set photon emission probability to 100%\n')
 print (g1, ' <- set photon emission probability to 100%\n')
 
 
 ### parse decay data file
 print ('\nParsing decay data file')
 print ('-------------------------------------')
-datapath = os.path.join(cdir, 'tables/decay_NuDat2.txt')
+datapath = os.path.join(cdir, 'tables/decay_NuDat3.txt')
 fin = open(datapath)
 lines = fin.readlines()
 fin.close()
 
-decayTable = [[[] for n in range(31)] for z in range(27)]
+decayTable = [[[] for n in range(NMAX + 1)] for z in range(ZMAX + 1)]
 
 for line in lines[1:-3]:
     d = Decay()
     d.load(line)
-    if (d.Z > 26) or (d.N > 30):
+    if (d.Z > ZMAX) or (d.N > NMAX):
         continue
-    if d.mode == 'IT':
+    if d.mode == 'IT':  # skip isomeric transition
         print (d, '<- skip (isomeric transition)')
+        continue
+    if d.mode == 'SF':  # skip spontaneous fission (not modelled in CRPropa)
+        print (d, '<- skip (spontaneous fission)')
         continue
     if d.tau == 0:
         print (d, '<- skip (missing lifetime)')
@@ -217,8 +225,8 @@ for line in lines[1:-3]:
 ### remove duplicate decays
 print ('\n\nRemoving duplicates')
 print ('-------------------------------------')
-for z in range(27):
-    for n in range(31):
+for z in range(ZMAX + 1):
+    for n in range(NMAX + 1):
         dList = decayTable[z][n]
 
         if len(dList) < 2:
@@ -236,42 +244,18 @@ for z in range(27):
 print ('\nExplicitly editing certain entries')
 print ('-------------------------------------')
 
-# remove Li-5 alpha decay (equivalent to existing proton emission)
-d0 = decayTable[3][2][0]
-d1 = decayTable[3][2][1]
-print (d0)
-print (d1, ' <- remove (equivalent to neutron emission)\n')
-decayTable[3][2].remove(d1)
-
-# remove He-5 alpha decay (equivalent to existing neutron emission)
-d0 = decayTable[2][3][0]
-d1 = decayTable[2][3][1]
-print (d1)
-print (d0, ' <- remove (equivalent to neutron emission)\n')
-decayTable[2][3].remove(d0)
-
-# modify B-12 "B3A" decay to "B2A" as it would leave an empty nucleus
-d = decayTable[5][7][1]
-print (d, ' <- change decay mode to B2A\n')
-d.mode = 'B2A'
-
-# Fe-45: to make beta+ decays exclusive
-d = decayTable[26][19][0]
-print (d, ' <- set branching ratio to 0 (ratio equal to sum of following ratios)')
-d.br = 0
-brSum = 0
-for d in decayTable[26][19][1:]:
-    print (d)
-    brSum += d.br
-for d in decayTable[26][19][1:]:
-    d.br /= brSum
+# Fe-45: EC includes EP (same branching ratio in NuDat3) - zero EC to make decays exclusive
+for d in decayTable[26][19]:
+    if d.mode == 'EC':
+        print (d, ' <- set branching ratio to 0 (EC is inclusive of EP)\n')
+        d.br = 0
 
 
 ### calculate exclusive mean life times
 print ('\n\nCalculating exclusive life times')
 print ('-------------------------------------')
-for z in range(27):
-    for n in range(31):
+for z in range(ZMAX + 1):
+    for n in range(NMAX + 1):
         dList = decayTable[z][n]
 
         # skip for 0 or 1 entry
@@ -327,8 +311,8 @@ hbar_c = c_light * (h_planck / 2 / np.pi)  # [m/J]
 
 nucMass = NuclearMassTable()
 
-for Z in range(27):
-    for N in range(31):
+for Z in range(ZMAX + 1):
+    for N in range(NMAX + 1):
         for d in decayTable[Z][N]:
             if not(d.isBetaPlus()):
                 continue
@@ -376,8 +360,8 @@ for Z in range(27):
 
 ### set immediate proton / neutron dripping for all other isotopes
 print ('\n\nSet proton / neutron dripping for all other isotopes')
-for z in range(0,27):
-    for n in range(0,31):
+for z in range(0, ZMAX + 1):
+    for n in range(0, NMAX + 1):
         if (z + n)==0:
             continue
 
@@ -409,7 +393,7 @@ try:
     git_hash = gh.get_git_revision_hash()
     fout.write('# Produced with crpropa-data version: '+git_hash+'\n')
 except:
-    pass 
+    pass
 fout.write('# Z, N, Decay Mode (#beta- #beta+ #alpha #p #n), Mean Life Time [s], Gamma Energy 1 [keV], Gamma Emission Probability 1, Gamma Energy 2 [keV], Gamma Emission Probability 2, ...\n')
 
 # decay mode codes: #beta- #beta+ #alpha #p #n
@@ -439,8 +423,8 @@ modeDict = {'STABLE' : '0',
         'E2P': '01020',
         'E3P': '01030'}
 
-for Z in range(27):
-    for N in range(31):
+for Z in range(ZMAX + 1):
+    for N in range(NMAX + 1):
         if (Z + N) == 0:
             continue
 
@@ -448,11 +432,19 @@ for Z in range(27):
             if d.isStable():
                 continue
 
-            mode = modeDict[d.mode]
+            try:
+                mode = modeDict[d.mode]
+            except KeyError:
+                print(d, ' <- skip (unknown decay mode: %s)' % d.mode)
+                continue
+
             s = '%i %i %s %e' % (Z, N, mode, d.tau)
 
             for key in gammaTable[Z][N].keys():
-                if modeDict[key] != mode:
+                try:
+                    if modeDict[key] != mode:
+                        continue
+                except KeyError:
                     continue
 
                 g = gammaTable[Z][N][key]
@@ -472,11 +464,11 @@ try:
     git_hash = gh.get_git_revision_hash()
     fout.write('# Produced with crpropa-data version: '+git_hash+'\n')
 except:
-    pass 
+    pass
 fout.write('# Z\tN\tA\n')
 fout.write('# isotopes with lifetime > 2s (including beta+ correction, see calc_decay.py)\n')
-for z in range(1,27):
-    for n in range(1,31):
+for z in range(1, ZMAX + 1):
+    for n in range(1, NMAX + 1):
         if (z + n)==0:
             continue
         c = 0  # total decay constant
@@ -495,11 +487,11 @@ try:
     git_hash = gh.get_git_revision_hash()
     fout.write('# Produced with crpropa-data version: '+git_hash+'\n')
 except:
-    pass 
+    pass
 fout.write('# Z\tN\tA\n')
 fout.write('# stable isotopes (including beta+ correction, see calc_decay.py)\n')
-for z in range(1,27):
-    for n in range(1,31):
+for z in range(1, ZMAX + 1):
+    for n in range(1, NMAX + 1):
         if (z + n)==0:
             continue
         for d in decayTable[z][n]:

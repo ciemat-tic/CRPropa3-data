@@ -94,8 +94,8 @@ def calculateDensityIntegral(field):
 
     # calculate integral
     I_gamma = np.zeros_like(alpha)
-    for i in range(len(alpha)):
-        I_gamma[i] = quad(lambda E: field.getDensity(E) / E**2, a = alpha[i], b = Emax, full_output=1)[0]
+    for i, a in enumerate(alpha):
+        I_gamma[i] = quad(lambda E: field.getDensity(E) / E**2, a = a, b = Emax, full_output=1)[0]
 
     # save file
     header = "# Integrated spectral photon density.\n" 
