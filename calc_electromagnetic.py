@@ -33,7 +33,12 @@ def sigmaICS(s):
     if (s < smin):  # numerically unstable close to smin
         return 0
 
-    # note: formula unstable for (s - smin) / smin < 1E-5
+    delta = s - smin
+
+    # Avoid numerical cancellation close to threshold.
+    if delta / smin <= 1e-5:
+        return sigma_thomson
+        
     b = (s - smin) / (s + smin)
     A = 2 / b / (1 + b) * (2 + 2 * b - b**2 - 2 * b**3)
     B = (2 - 3 * b**2 - b**3) / b**2 * (np.log1p(b) - np.log1p(-b))
