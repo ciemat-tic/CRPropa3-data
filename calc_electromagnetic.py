@@ -4,9 +4,13 @@ import interactionRate
 import os
 import gitHelp as gh
 from calc_all import fields_cmbebl, fields_urb
-from units import eV, mass_electron, c_light, sigma_thomson, alpha_finestructure
+from units import (eV, mass_electron, c_light, h_planck, k_boltzmann, sigma_thomson, alpha_finestructure, Mpc)
 
 me2 = (mass_electron*c_light**2.) ** 2  # squared electron mass [J^2/c^4]
+
+ICS_MIN_ENERGY = 1 * eV  # Minimum primary kinetic energy tabulated for ICS
+ICS_THOMSON_TRANSITION = 1e8 * eV  # Energy below which the total ICS rate uses the Thomson limit
+ICS_S_KIN_LOG10_MIN = -12  # Minimum log10(s_kin / eV^2) of the ICS integration grids
 
 def sigmaPP(s):
     """ Pair production cross section (Breit-Wheeler), see Lee 1996 """
@@ -76,6 +80,26 @@ def getEmin(sigma, field):
     """ Return minimum required cosmic ray energy for interaction *sigma* with *field* """
     return getSmin(sigma) / 4 / field.getEmax()
 
+def photonNumberDensity(field):
+    """Return the total photon number density [1/m^3]."""
+    if hasattr(field, "T_CMB"):
+        zeta3 = 1.202056903159594
+        return (16* np.pi* zeta3* (k_boltzmann * field.T_CMB)**3/ (h_planck * c_light)**3)
+
+    eps = np.logspace(np.log10(field.getEmin()), np.log10(field.getEmax()), 200000)
+    density = np.asarray(field.getDensity(eps), dtype=float).squeeze()
+    density = np.where(np.isfinite(density), density, 0.)
+
+    # Support both old and new NumPy integration APIs.
+    if hasattr(np, "trapezoid"):
+        return np.trapezoid(density, eps)
+
+    return np.trapz(density, eps)
+
+def thomsonRate(field):
+    """Return the Thomson-limit ICS interaction rate [1/Mpc]."""
+    return photonNumberDensity(field) * sigma_thomson * Mpc
+
 def calcRateSChunked(s_kin, xs, E, field, cdf=False):
     """Calculate interaction rates in primary-energy chunks."""
     chunk_size = 8 if cdf else 16
@@ -101,18 +125,25 @@ def process(sigma, field, name):
         os.makedirs(folder)
 
     # tabulated energies, limit to energies where the interaction is possible
-    Emin = getEmin(sigma, field)
-    E = np.logspace(9, 23, 281) * eV
-    E = E[E > Emin]
+    if sigma is sigmaICS:
+        E = np.logspace(np.log10(ICS_MIN_ENERGY / eV), 23, 461) * eV
+        skin_log_min = ICS_S_KIN_LOG10_MIN
+    else:
+        Emin = getEmin(sigma, field)
+        E = np.logspace(9, 23, 281) * eV
+        E = E[E > Emin]
+        skin_log_min = 4
     
     # -------------------------------------------
     # calculate interaction rates
     # -------------------------------------------
     # tabulated values of s_kin = s - mc^2
     # Note: integration method (Romberg) requires 2^n + 1 log-spaced tabulation points
-    s_kin = np.logspace(4, 23, 2 ** 18 + 1) * eV**2
+    s_kin = np.logspace(skin_log_min, 23, 2**18 + 1) * eV**2
     xs = getTabulatedXS(sigma, s_kin)
     rate = calcRateSChunked(s_kin, xs, E, field)
+    if sigma is sigmaICS:
+        rate[E <= ICS_THOMSON_TRANSITION] = thomsonRate(field)
 
     # save
     fname = folder + '/rate_%s.txt' % field.name
@@ -138,15 +169,18 @@ def process(sigma, field, name):
 
     # tabulated values of s_kin = s - mc^2, limit to relevant range
     # Note: use higher resolution and then downsample
-    skin = np.logspace(4, 23, 380000 + 1) * eV**2
+    if sigma is sigmaICS:
+        skin = np.logspace(ICS_S_KIN_LOG10_MIN, 23, 70001) * eV**2
+        skin_save = np.logspace(ICS_S_KIN_LOG10_MIN, 23, 351) * eV**2
+    else:
+        skin = np.logspace(4, 23, 380000 + 1) * eV**2
+        skin_save = np.logspace(4, 23, 190 + 1) * eV**2
     skin = skin[skin > skin_min]
-
+    skin_save = skin_save[skin_save > skin_min]
     xs = getTabulatedXS(sigma, skin)
     rate = calcRateSChunked(skin, xs, E, field, cdf=True)
 
-    # downsample
-    skin_save = np.logspace(4, 23, 190 + 1) * eV**2
-    skin_save = skin_save[skin_save > skin_min]
+    # Downsample the CDF onto the grid used by C++ sampling
     rate_save = np.array([np.interp(skin_save, skin, r) for r in rate])
 
     # save

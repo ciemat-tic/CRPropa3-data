@@ -56,6 +56,8 @@ def calc_rate_s(s_kin, xs, E, field, z=0, cdf=False, density_primary_energy_max=
         if density_primary_energy_max is None:
             density_primary_energy_max = np.max(E)
 
+        densityIntegral = calculateDensityIntegral(field, s_kin_min=s_kin[0], primary_energy_max=density_primary_energy_max)
+
         # interpolate
         I = np.zeros((len(E), len(s_kin)))
         for j in range(len(E)):
@@ -71,7 +73,7 @@ def calc_rate_s(s_kin, xs, E, field, z=0, cdf=False, density_primary_energy_max=
         ds = mean_log_spacing(s_kin)
         return romb(y, dx=ds) / 2 / E * Mpc
 
-def calculateDensityIntegral(field):
+def calculateDensityIntegral(fields_kin_min=1e4 * eV**2, primary_energy_max=1e23 * eV):
     """ 
         Precalculate the integral over the density 
         int_{Emin}^{Emax} n(eps) / eps^2  deps 
@@ -84,13 +86,15 @@ def calculateDensityIntegral(field):
     folder = "temp/fieldDensity/"
     if not os.path.isdir(folder):
         os.makedirs(folder)
-    file = folder + field.name + ".txt"
+    min_log10 = int(np.floor(np.log10(s_kin_min / eV**2)))
+    max_log10 = int(np.ceil(np.log10(primary_energy_max / eV)))
+    file = folder + field.name + "_smin%d_Emax%d.txt" % (min_log10, max_log10)
     if os.path.isfile(file):
         return # file already existst no calculation necessary
 
     # precalc the photon density integral 
     Emax = field.getEmax()
-    Emin =  1e4 / 4 / 1e23 * eV # min(s_kin) / 4 / max(E_e)
+    Emin = s_kin_min / 4 / primary_energy_max # min(s_kin) / 4 / max(E_e)
     alpha = np.logspace(np.log10(Emin), np.log10(Emax), 10000) # lower boundary of the integral.
 
     # calculate integral
@@ -110,7 +114,7 @@ def calculateDensityIntegral(field):
     data = np.c_[alpha, I_gamma]
     fmt = '%.4e\t%8.7e'
     np.savetxt(file, data, fmt = fmt, header = header)
-
+    return data
 
 def mean_log_spacing(x):
     """ <Delta log(x)> """
