@@ -76,7 +76,16 @@ def getEmin(sigma, field):
     """ Return minimum required cosmic ray energy for interaction *sigma* with *field* """
     return getSmin(sigma) / 4 / field.getEmax()
 
+def calcRateSChunked(s_kin, xs, E, field, cdf=False):
+    """Calculate interaction rates in primary-energy chunks."""
+    chunk_size = 8 if cdf else 16
+    chunks = []
 
+    for i in range(0, len(E), chunk_size):
+        chunks.append(interactionRate.calc_rate_s(s_kin, xs, E[i:i + chunk_size], field, cdf=cdf))
+
+    return np.concatenate(chunks, axis=0)
+    
 def process(sigma, field, name):
     """ 
         calculate the interaction rates for a given process on a given photon field 
@@ -103,7 +112,7 @@ def process(sigma, field, name):
     # Note: integration method (Romberg) requires 2^n + 1 log-spaced tabulation points
     s_kin = np.logspace(4, 23, 2 ** 18 + 1) * eV**2
     xs = getTabulatedXS(sigma, s_kin)
-    rate = interactionRate.calc_rate_s(s_kin, xs, E, field)
+    rate = calcRateSChunked(s_kin, xs, E, field)
 
     # save
     fname = folder + '/rate_%s.txt' % field.name
@@ -133,7 +142,7 @@ def process(sigma, field, name):
     skin = skin[skin > skin_min]
 
     xs = getTabulatedXS(sigma, skin)
-    rate = interactionRate.calc_rate_s(skin, xs, E, field, cdf=True)
+    rate = calcRateSChunked(skin, xs, E, field, cdf=True)
 
     # downsample
     skin_save = np.logspace(4, 23, 190 + 1) * eV**2
@@ -167,3 +176,4 @@ if __name__ == "__main__":
         process(sigmaDPP, field, 'EMDoublePairProduction')
         process(sigmaTPP, field, 'EMTripletPairProduction')
         process(sigmaICS, field, 'EMInverseComptonScattering')
+

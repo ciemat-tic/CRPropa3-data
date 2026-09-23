@@ -32,7 +32,7 @@ def calc_rate_eps(eps, xs, gamma, field, z=0, cdf=False):
         return romb(y, dx=dx) / gamma * Mpc
 
 
-def calc_rate_s(s_kin, xs, E, field, z=0, cdf=False):
+def calc_rate_s(s_kin, xs, E, field, z=0, cdf=False, density_primary_energy_max=None):
     """
     Calculate the interaction rate for given tabulated cross sections against an isotropic photon background.
     The tabulated cross sections need to be of length n = 2^i + 1 and the tabulation points log-linearly spaced.
@@ -43,6 +43,8 @@ def calc_rate_s(s_kin, xs, E, field, z=0, cdf=False):
     field : photon background, see photonField.py
     z     : redshift
     cdf   : calculate cumulative differential rate
+    density_primary_energy_max : maximum primary energy used to tabulate the
+    photon-density integral for chunked cdf calculations [J]
 
     Returns :
         interaction rate 1/lambda(gamma) [1/Mpc] or
@@ -50,10 +52,9 @@ def calc_rate_s(s_kin, xs, E, field, z=0, cdf=False):
     """
 
     if cdf:
-        # precalculate the field integral if it not exists and load it afterwards
-        calculateDensityIntegral(field)
-        file = "temp/fieldDensity/" + field.name + ".txt"
-        densityIntegral = np.loadtxt(file)
+        # Preserve the original behaviour when no global maximum is supplied.
+        if density_primary_energy_max is None:
+            density_primary_energy_max = np.max(E)
 
         # interpolate
         I = np.zeros((len(E), len(s_kin)))
