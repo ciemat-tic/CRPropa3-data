@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.integrate import cumulative_trapezoid, romb, quad
+from scipy.integrate import cumulative_trapezoid, romb
 import os
 from units import eV, Mpc
 import gitHelp as gh
@@ -44,7 +44,7 @@ def calc_rate_s(s_kin, xs, E, field, z=0, cdf=False, density_primary_energy_max=
     z     : redshift
     cdf   : calculate cumulative differential rate
     density_primary_energy_max : maximum primary energy used to tabulate the
-    photon-density integral for chunked cdf calculations [J]
+          photon-density integral for chunked cdf calculations [J]
 
     Returns :
         interaction rate 1/lambda(gamma) [1/Mpc] or
@@ -52,11 +52,14 @@ def calc_rate_s(s_kin, xs, E, field, z=0, cdf=False, density_primary_energy_max=
     """
 
     if cdf:
-        # Preserve the original behaviour when no global maximum is supplied.
+        # precalculate the field integral if it not exists and load it afterwards
         if density_primary_energy_max is None:
             density_primary_energy_max = np.max(E)
-
-        densityIntegral = calculateDensityIntegral(field, s_kin_min=s_kin[0], primary_energy_max=density_primary_energy_max)
+        densityIntegral = calculateDensityIntegral(
+            field,
+            s_kin_min=s_kin[0],
+            primary_energy_max=density_primary_energy_max
+        )
 
         # interpolate
         I = np.zeros((len(E), len(s_kin)))
@@ -65,7 +68,7 @@ def calc_rate_s(s_kin, xs, E, field, z=0, cdf=False, density_primary_energy_max=
 
         # calculate cdf
         y = np.array([xs * s_kin for i in range(len(E))]) * I
-        return cumulative_trapezoid(y = y, x = s_kin, initial=0) / 8 / np.expand_dims(E, -1)**2 * Mpc    
+        return cumulative_trapezoid(y = y, x = s_kin, initial=0) / 8 / np.expand_dims(E, -1)**2 * Mpc
     else:
         F = cumulative_trapezoid(x=s_kin, y=s_kin * xs, initial=0)
         n = field.getDensity(np.outer(1. / (4 * E), s_kin), z)
@@ -73,10 +76,10 @@ def calc_rate_s(s_kin, xs, E, field, z=0, cdf=False, density_primary_energy_max=
         ds = mean_log_spacing(s_kin)
         return romb(y, dx=ds) / 2 / E * Mpc
 
-def calculateDensityIntegral(fields_kin_min=1e4 * eV**2, primary_energy_max=1e23 * eV):
-    """ 
-        Precalculate the integral over the density 
-        int_{Emin}^{Emax} n(eps) / eps^2  deps 
+def calculateDensityIntegral(field, s_kin_min=1e4 * eV**2, primary_energy_max=1e23 * eV):
+    """
+        Precalculate the integral over the density
+        int_{Emin}^{Emax} n(eps) / eps^2  deps
         and save as a file.
 
         field : photon background, see photonField.py
@@ -90,22 +93,24 @@ def calculateDensityIntegral(fields_kin_min=1e4 * eV**2, primary_energy_max=1e23
     max_log10 = int(np.ceil(np.log10(primary_energy_max / eV)))
     file = folder + field.name + "_smin%d_Emax%d.txt" % (min_log10, max_log10)
     if os.path.isfile(file):
-        return # file already existst no calculation necessary
+        return np.loadtxt(file) # file already exists, no calculation necessary
 
-    # precalc the photon density integral 
+    # precalc the photon density integral
     Emax = field.getEmax()
-    Emin = s_kin_min / 4 / primary_energy_max # min(s_kin) / 4 / max(E_e)
+    Emin =  s_kin_min / 4 / primary_energy_max
     alpha = np.logspace(np.log10(Emin), np.log10(Emax), 10000) # lower boundary of the integral.
 
-    # calculate integral
-    I_gamma = np.zeros_like(alpha)
-    for i, a in enumerate(alpha):
-        I_gamma[i] = quad(lambda E: field.getDensity(E) / E**2, a = a, b = Emax, full_output=1)[0]
+    eps = np.logspace(np.log10(Emin), np.log10(Emax), 100000)
+    integrand = np.asarray(field.getDensity(eps), dtype=float).squeeze() / eps**2
+    integrand = np.where(np.isfinite(integrand), integrand, 0.)
+    total = cumulative_trapezoid(integrand, eps, initial=0)[-1]
+    prefix = cumulative_trapezoid(integrand, eps, initial=0)
+    I_gamma = total - np.interp(alpha, eps, prefix)
 
     # save file
-    header = "# Integrated spectral photon density.\n" 
+    header = "# Integrated spectral photon density.\n"
     header += "# Integral n(e)/e^2 de from eMin to eMax, where eMax is the maximal photon energy of the background \n"
-    try: 
+    try:
         git_hash = gh.get_git_revision_hash()
         header += "# Produced with crpropa-data version: "+git_hash+"\n"
         header += "# eMin [eV]\tintegral\n"
@@ -115,6 +120,7 @@ def calculateDensityIntegral(fields_kin_min=1e4 * eV**2, primary_energy_max=1e23
     fmt = '%.4e\t%8.7e'
     np.savetxt(file, data, fmt = fmt, header = header)
     return data
+
 
 def mean_log_spacing(x):
     """ <Delta log(x)> """
